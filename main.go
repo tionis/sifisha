@@ -1,38 +1,52 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
+	"github.com/dusted-go/logging/prettylog"
+	"github.com/urfave/cli/v2"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"log"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
-
-	"github.com/urfave/cli/v2"
 
 	"github.com/pkg/sftp"
 )
 
 func main() {
+	var remotePrefix string
+	var client *sftp.Client
+	var logger *slog.Logger
+	var sshConn *ssh.Client
+
+	defer func(conn *ssh.Client) {
+		if conn != nil {
+			err := conn.Close()
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}(sshConn)
+
+	defer func(sc *sftp.Client) {
+		if sc != nil {
+			err := sc.Close()
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}(client)
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatal(err)
 	}
 	sshDir := path.Join(home, ".ssh")
-	var defaultSshKey string
-	if os.Getenv("SSH_KEY_PATH") != "" {
-		defaultSshKey = os.Getenv("SSH_KEY_PATH")
-	} else {
-		defaultSshKey = path.Join(sshDir, "id_ed25519")
-	}
-	sshKeyContents := os.Getenv("SSH_KEY_CONTENTS")
-	var remotePrefix string
-	var client *sftp.Client
 
 	app := &cli.App{
 		Flags: []cli.Flag{
@@ -43,44 +57,24 @@ func main() {
 				Usage:    "sftp remote to connect to",
 			},
 			&cli.StringFlag{
-				Name:     "key",
-				Aliases:  []string{"k"},
-				Required: false,
-				Usage:    "path to private key",
-				Value:    defaultSshKey,
-			},
-			&cli.StringFlag{
-				Name:  "host-key",
-				Usage: "host key to verify against",
-				Value: os.Getenv("SSH_HOST_KEY"),
+				Name:  "log-level",
+				Usage: "set log level (debug, info, warn, error, fatal, panic)",
+				Value: "info",
 			},
 		},
 		Before: func(context *cli.Context) error {
-			parsedRemote, err := url.Parse(context.String("remote"))
+			logger, err = getLoggerFromLevelStr(context.String("log-level"))
 			if err != nil {
-				return err
-			}
-			user := parsedRemote.User.Username()
-			pass, _ := parsedRemote.User.Password()
-			host := parsedRemote.Hostname()
-			port := parsedRemote.Port()
-			remotePrefix = parsedRemote.Path
-			if port == "" {
-				port = "22"
+				return fmt.Errorf("failed to create logger: %v", err)
 			}
 
-			var hostKey ssh.PublicKey
-			if context.String("host-key") == "" {
-				hostKey = getHostKey(host)
-			} else {
-				hostKeyString := context.String("host-key")
-				hostKey, _, _, _, err = ssh.ParseAuthorizedKey([]byte(hostKeyString))
-			}
-
-			_, err = fmt.Fprintf(os.Stdout, "Connecting to %s ...\n", host)
+			var user, pass, host, port string
+			user, pass, host, port, remotePrefix, err = parseSftpRemote(context.String("remote"))
 			if err != nil {
-				return err
+				logger.Error("failed to parse remote", "error", err)
+				return fmt.Errorf("failed to parse remote: %v", err)
 			}
+			logger.Debug("parsed remote", "user", user, "host", host, "port", port, "remotePrefix", remotePrefix)
 
 			var auths []ssh.AuthMethod
 
@@ -90,28 +84,32 @@ func main() {
 				auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
 			}
 
+			if key, err := ssh.ParsePrivateKey([]byte(os.Getenv("SSH_PRIVATE_KEY"))); err == nil {
+				auths = append(auths, ssh.PublicKeys(key))
+			}
+
+			if _, err := os.Stat(path.Join(sshDir, "id_ed25519")); err == nil {
+				bytes, err := os.ReadFile(path.Join(sshDir, "id_ed25519"))
+				if err != nil {
+					return fmt.Errorf("failed to read private key: %v", err)
+				}
+				key, err := ssh.ParsePrivateKey(bytes)
+				if err != nil {
+					logger.Error("failed to parse private key", "error", err)
+					return fmt.Errorf("failed to parse private key: %v", err)
+				}
+				auths = append(auths, ssh.PublicKeys(key))
+			}
+
 			// Use password authentication if provided
 			if pass != "" {
 				auths = append(auths, ssh.Password(pass))
 			}
 
-			if sshKeyContents != "" {
-				signer, err := ssh.ParsePrivateKey([]byte(sshKeyContents))
-				if err != nil {
-					return err
-				}
-				auths = append(auths, ssh.PublicKeys(signer))
-			} else if pass == "" {
-				keyPath := context.String("key")
-				key, err := os.ReadFile(keyPath)
-				if err != nil {
-					return err
-				}
-				signer, err := ssh.ParsePrivateKey(key)
-				if err != nil {
-					return err
-				}
-				auths = append(auths, ssh.PublicKeys(signer))
+			knownHosts, err := knownhosts.New(path.Join(sshDir, "known_hosts"))
+			if err != nil {
+				logger.Error("failed to load known hosts", "error", err)
+				return fmt.Errorf("failed to load known hosts: %v", err)
 			}
 
 			// Initialize client configuration
@@ -120,46 +118,52 @@ func main() {
 				Auth: auths,
 				// Uncomment to ignore host key check
 				//HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-				HostKeyCallback: ssh.FixedHostKey(hostKey),
+				HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+					if err := knownHosts(hostname, remote, key); err != nil {
+						keyStr := ssh.FingerprintSHA256(key)
+						keyMarshaled := ssh.MarshalAuthorizedKey(key)
+						logger.Error("failed to verify host key", "error", err, "hostname", hostname, "keyFingerprint", keyStr, "key", keyMarshaled)
+						return fmt.Errorf("failed to verify host key: %v", err)
+					}
+					return nil
+				},
 			}
 
 			addr := fmt.Sprintf("%s:%s", host, port)
 
-			// Connect to server
-			conn, err := ssh.Dial("tcp", addr, &config)
-			if err != nil {
-				_, err = fmt.Fprintf(os.Stderr, "Failed to connect to [%s]: %v\n", addr, err)
-				if err != nil {
-					return err
-				}
-				os.Exit(1)
-			}
+			logger.Info("connecting to remote", "addr", addr)
 
-			defer func(conn *ssh.Client) {
-				err := conn.Close()
-				if err != nil {
-					log.Println(err)
-				}
-			}(conn)
+			// Connect to server
+			sshConn, err = ssh.Dial("tcp", addr, &config)
+			if err != nil {
+				logger.Error("failed to connect to remote", "addr", addr, "error", err)
+				return fmt.Errorf("failed to connect to remote: %v", err)
+			}
 
 			// Create new SFTP client
-			client, err = sftp.NewClient(conn)
+			client, err = sftp.NewClient(sshConn)
 			if err != nil {
-				_, err = fmt.Fprintf(os.Stderr, "Unable to start SFTP subsystem: %v\n", err)
-				if err != nil {
-					return err
-				}
-				os.Exit(1)
+				logger.Error("failed to create sftp client", "error", err)
+				return fmt.Errorf("failed to create sftp client: %v", err)
 			}
-			//defer func(sc *sftp.Client) {
-			//	err := sc.Close()
-			//	if err != nil {
-			//		log.Println(err)
-			//	}
-			//}(sc)
 			return nil
 		},
 		Commands: []*cli.Command{
+			{
+				Name:    "serve",
+				Aliases: []string{"s"},
+				Usage:   "start the SiFiSha proxy server",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "listen",
+						Usage: "address to listen on",
+						Value: "0.0.0.0:2848",
+					},
+				},
+				Action: func(cCtx *cli.Context) error {
+					return serve(cCtx.String("listen"), client, logger.WithGroup("proxy"))
+				},
+			},
 			{
 				Name:    "ls",
 				Aliases: []string{"a"},
@@ -169,7 +173,7 @@ func main() {
 					if listPath == "" {
 						listPath = "."
 					}
-					files, err := client.ReadDir(path.Join(remotePrefix, listPath))
+					files, err := client.ReadDir(path.Join(strings.TrimPrefix(remotePrefix, "/"), listPath))
 					if err != nil {
 						return err
 					}
@@ -177,38 +181,6 @@ func main() {
 						fmt.Println(file.Name())
 					}
 					return nil
-				},
-			},
-			{
-				Name:    "complete",
-				Aliases: []string{"c"},
-				Usage:   "complete a task on the list",
-				Action: func(cCtx *cli.Context) error {
-					fmt.Println("completed task: ", cCtx.Args().First())
-					return nil
-				},
-			},
-			{
-				Name:    "template",
-				Aliases: []string{"t"},
-				Usage:   "options for task templates",
-				Subcommands: []*cli.Command{
-					{
-						Name:  "add",
-						Usage: "add a new template",
-						Action: func(cCtx *cli.Context) error {
-							fmt.Println("new task template: ", cCtx.Args().First())
-							return nil
-						},
-					},
-					{
-						Name:  "remove",
-						Usage: "remove an existing template",
-						Action: func(cCtx *cli.Context) error {
-							fmt.Println("removed task template: ", cCtx.Args().First())
-							return nil
-						},
-					},
 				},
 			},
 		},
@@ -219,53 +191,46 @@ func main() {
 	}
 }
 
-// Get host key from local known hosts
-func getHostKey(host string) ssh.PublicKey {
-	// parse OpenSSH known_hosts file
-	// ssh or use ssh-keyscan to get initial key
-	file, err := os.Open(filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts"))
+func parseSftpRemote(sftpUrl string) (user, pass, host, port, remotePrefix string, err error) {
+	if !strings.HasPrefix(sftpUrl, "sftp://") {
+		sftpUrl = "sftp://" + sftpUrl
+	}
+	parsedRemote, err := url.Parse(sftpUrl)
 	if err != nil {
-		_, err := fmt.Fprintf(os.Stderr, "Unable to read known_hosts file: %v\n", err)
-		if err != nil {
-			return nil
-		}
-		os.Exit(1)
+		return "", "", "", "", "", fmt.Errorf("failed to parse remote: %v", err)
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			log.Println(err)
-		}
-	}(file)
-
-	scanner := bufio.NewScanner(file)
-	var hostKey ssh.PublicKey
-	for scanner.Scan() {
-		fields := strings.Split(scanner.Text(), " ")
-		if len(fields) != 3 {
-			continue
-		}
-		if strings.Contains(fields[0], host) {
-			var err error
-			hostKey, _, _, _, err = ssh.ParseAuthorizedKey(scanner.Bytes())
-			if err != nil {
-				_, err := fmt.Fprintf(os.Stderr, "Error parsing %q: %v\n", fields[2], err)
-				if err != nil {
-					return nil
-				}
-				os.Exit(1)
-			}
-			break
-		}
+	user = parsedRemote.User.Username()
+	pass, _ = parsedRemote.User.Password()
+	host = parsedRemote.Hostname()
+	port = parsedRemote.Port()
+	remotePrefix = parsedRemote.Path
+	if port == "" {
+		port = "22"
 	}
+	return user, pass, host, port, remotePrefix, nil
+}
 
-	if hostKey == nil {
-		_, err := fmt.Fprintf(os.Stderr, "No hostkey found for %s", host)
-		if err != nil {
-			return nil
-		}
-		os.Exit(1)
+func getLoggerFromLevelStr(levelStr string) (*slog.Logger, error) {
+	logLevel := slog.LevelInfo
+	switch strings.ToUpper(levelStr) {
+	case "DEBUG":
+		logLevel = slog.LevelDebug
+	case "INFO":
+		logLevel = slog.LevelInfo
+	case "WARN":
+		logLevel = slog.LevelWarn
+	case "ERROR":
+		logLevel = slog.LevelError
+	default:
+		return nil, fmt.Errorf("invalid log level: %s", levelStr)
 	}
-
-	return hostKey
+	var addSource bool
+	if logLevel == slog.LevelDebug {
+		addSource = true
+	}
+	loggerOpts := &slog.HandlerOptions{
+		Level:     logLevel,
+		AddSource: addSource,
+	}
+	return slog.New(prettylog.NewHandler(loggerOpts)), nil
 }

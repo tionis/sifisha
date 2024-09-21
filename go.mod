@@ -3,6 +3,7 @@ module github.com/tionis/sifisha
 go 1.23.1
 
 require (
+	github.com/dusted-go/logging v1.3.0
 	github.com/pkg/sftp v1.13.6
 	github.com/urfave/cli/v2 v2.27.4
 	golang.org/x/crypto v0.27.0

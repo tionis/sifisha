@@ -1,6 +1,9 @@
 # github.com/cpuguy83/go-md2man/v2 v2.0.4
 ## explicit; go 1.11
 github.com/cpuguy83/go-md2man/v2/md2man
+# github.com/dusted-go/logging v1.3.0
+## explicit; go 1.21.0
+github.com/dusted-go/logging/prettylog
 # github.com/kr/fs v0.1.0
 ## explicit
 github.com/kr/fs
@@ -27,6 +30,7 @@ golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
+golang.org/x/crypto/ssh/knownhosts
 # golang.org/x/sys v0.25.0
 ## explicit; go 1.18
 golang.org/x/sys/cpu
