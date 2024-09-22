@@ -161,7 +161,16 @@ func main() {
 					},
 				},
 				Action: func(cCtx *cli.Context) error {
-					return serve(cCtx.String("listen"), client, logger.WithGroup("proxy"))
+					server, err := newServer(
+						client,
+						logger,
+						os.Getenv("GITHUB_CLIENT_ID"),
+						os.Getenv("GITHUB_CLIENT_SECRET"))
+					if err != nil {
+						logger.Error("failed to create server", "error", err)
+						return fmt.Errorf("failed to create server: %v", err)
+					}
+					return server.serve(cCtx.String("listen"))
 				},
 			},
 			{

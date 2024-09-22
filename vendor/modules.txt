@@ -4,6 +4,16 @@ github.com/cpuguy83/go-md2man/v2/md2man
 # github.com/dusted-go/logging v1.3.0
 ## explicit; go 1.21.0
 github.com/dusted-go/logging/prettylog
+# github.com/go-chi/chi/v5 v5.1.0
+## explicit; go 1.14
+github.com/go-chi/chi/v5
+github.com/go-chi/chi/v5/middleware
+# github.com/google/go-github/v65 v65.0.0
+## explicit; go 1.21
+github.com/google/go-github/v65/github
+# github.com/google/go-querystring v1.1.0
+## explicit; go 1.10
+github.com/google/go-querystring/query
 # github.com/kr/fs v0.1.0
 ## explicit
 github.com/kr/fs
@@ -14,6 +24,8 @@ github.com/pkg/sftp/internal/encoding/ssh/filexfer
 # github.com/russross/blackfriday/v2 v2.1.0
 ## explicit
 github.com/russross/blackfriday/v2
+# github.com/stretchr/testify v1.9.0
+## explicit; go 1.17
 # github.com/urfave/cli/v2 v2.27.4
 ## explicit; go 1.18
 github.com/urfave/cli/v2
