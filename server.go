@@ -7,6 +7,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/go-github/v65/github"
+	"github.com/markbates/goth"
+	"github.com/markbates/goth/gothic"
+	gothGithub "github.com/markbates/goth/providers/github"
 	"github.com/pkg/sftp"
 	"io/fs"
 	"log/slog"
@@ -156,16 +159,40 @@ func (s *server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.FS(assetFs)).ServeHTTP(w, r)
 }
 
-func (s *server) handleGithubCallback(w http.ResponseWriter, r *http.Request) {
-	// TODO
-	// get token from request
-	// get user from token
-	// set cookie with user info
-	// redirect to /
+func (s *server) callbackHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	provider := ctx.Value("provider").(string)
+	q := r.URL.Query()
+	q.Add("provider", provider)
+	r.URL.RawQuery = q.Encode()
+	_, err := gothic.CompleteUserAuth(w, r)
+	if err != nil {
+		s.logger.Error("failed to complete user auth", "error", err)
+		http.Error(w, "failed to complete user auth", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/auth_success", http.StatusTemporaryRedirect)
+}
+
+func (s *server) signInWithProvider(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	provider := ctx.Value("provider").(string)
+	q := r.URL.Query()
+	q.Add("provider", provider)
+	r.URL.RawQuery = q.Encode()
+
+	gothic.BeginAuthHandler(w, r)
 }
 
 func (s *server) serve(listenAddr string) error {
 	r := chi.NewRouter()
+
+	goth.UseProviders(
+		gothGithub.New(
+			s.githubClientID,
+			s.githubClientSecret,
+			"http://localhost:2848/oauth/github/callback"))
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -179,12 +206,13 @@ func (s *server) serve(listenAddr string) error {
 
 	r.Get("/", s.handleAsset)
 	r.Get("/favicon.ico", s.handleAsset)
-	r.Get("/oauth/github/callback", s.handleGithubCallback)
-	r.Get("/gh_logout", func(w http.ResponseWriter, r *http.Request) {
+
+	r.Get("/auth/:provider/callback", s.callbackHandler)
+	r.Get("/auth/:provider", s.signInWithProvider)
+	r.Get("/auth_success", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "text/html")
-		w.Header().Set("Set-Cookie", "gh_token=; Max-Age=0; Path=/")
-		content, err := assets.ReadFile("assets/gh_logout.html")
+		content, err := assets.ReadFile("assets/auth_success.html")
 		if err != nil {
 			http.Error(w, "failed to read asset", http.StatusInternalServerError)
 			s.logger.Error("failed to read asset", "error", err)
@@ -197,6 +225,7 @@ func (s *server) serve(listenAddr string) error {
 			return
 		}
 	})
+	// logout
 	r.Get("/robots.txt", s.handleAsset)
 	r.Get("/index.html", s.handleAsset)
 	r.Get("/.well-known/*", s.handleAsset)
