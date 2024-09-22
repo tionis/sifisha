@@ -6,6 +6,7 @@ require (
 	github.com/dusted-go/logging v1.3.0
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/google/go-github/v65 v65.0.0
+	github.com/gorilla/sessions v1.4.0
 	github.com/markbates/goth v1.80.0
 	github.com/pkg/sftp v1.13.6
 	github.com/urfave/cli/v2 v2.27.4
@@ -18,8 +19,7 @@ require (
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/gorilla/context v1.1.1 // indirect
 	github.com/gorilla/mux v1.6.2 // indirect
-	github.com/gorilla/securecookie v1.1.1 // indirect
-	github.com/gorilla/sessions v1.1.1 // indirect
+	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect

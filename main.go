@@ -165,7 +165,8 @@ func main() {
 						client,
 						logger,
 						os.Getenv("GITHUB_CLIENT_ID"),
-						os.Getenv("GITHUB_CLIENT_SECRET"))
+						os.Getenv("GITHUB_CLIENT_SECRET"),
+						os.Getenv("COOKIE_SECRET"))
 					if err != nil {
 						logger.Error("failed to create server", "error", err)
 						return fmt.Errorf("failed to create server: %v", err)

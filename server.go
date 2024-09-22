@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/go-github/v65/github"
+	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 	gothGithub "github.com/markbates/goth/providers/github"
@@ -44,9 +45,10 @@ type server struct {
 	githubUsersMutexMapMutex sync.Mutex
 	githubClientID           string
 	githubClientSecret       string
+	cookieStore              sessions.Store
 }
 
-func newServer(client *sftp.Client, logger *slog.Logger, githubClientID, githubClientSecret string) (*server, error) {
+func newServer(client *sftp.Client, logger *slog.Logger, githubClientID, githubClientSecret, sessionKey string) (*server, error) {
 	return &server{
 		client:                   client,
 		logger:                   logger,
@@ -55,6 +57,7 @@ func newServer(client *sftp.Client, logger *slog.Logger, githubClientID, githubC
 		githubUsersMutexMapMutex: sync.Mutex{},
 		githubClientID:           githubClientID,
 		githubClientSecret:       githubClientSecret,
+		cookieStore:              sessions.NewCookieStore([]byte(sessionKey)),
 	}, nil
 }
 
@@ -160,8 +163,7 @@ func (s *server) handleAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) callbackHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	provider := ctx.Value("provider").(string)
+	provider := chi.URLParam(r, "provider")
 	q := r.URL.Query()
 	q.Add("provider", provider)
 	r.URL.RawQuery = q.Encode()
@@ -176,8 +178,7 @@ func (s *server) callbackHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) signInWithProvider(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	provider := ctx.Value("provider").(string)
+	provider := chi.URLParam(r, "provider")
 	q := r.URL.Query()
 	q.Add("provider", provider)
 	r.URL.RawQuery = q.Encode()
@@ -207,8 +208,8 @@ func (s *server) serve(listenAddr string) error {
 	r.Get("/", s.handleAsset)
 	r.Get("/favicon.ico", s.handleAsset)
 
-	r.Get("/auth/:provider/callback", s.callbackHandler)
-	r.Get("/auth/:provider", s.signInWithProvider)
+	r.Get("/oauth/{provider}/callback", s.callbackHandler)
+	r.Get("/oauth/{provider}", s.signInWithProvider)
 	r.Get("/auth_success", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "text/html")
