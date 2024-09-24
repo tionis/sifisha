@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -12,9 +13,13 @@ import (
 	"github.com/markbates/goth/gothic"
 	gothGithub "github.com/markbates/goth/providers/github"
 	"github.com/pkg/sftp"
+	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"path"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,12 +38,13 @@ var (
 type githubUser struct {
 	Name               string
 	Orgs               []string
-	Teams              []string
+	Teams              map[string][]string
 	MetaDataValidUntil time.Time
 }
 
 type server struct {
 	client                   *sftp.Client
+	sftpPrefix               string
 	logger                   *slog.Logger
 	githubUsers              map[string]githubUser
 	githubUsersMutexMap      map[string]*sync.Mutex
@@ -46,9 +52,34 @@ type server struct {
 	githubClientID           string
 	githubClientSecret       string
 	cookieStore              sessions.Store
+	githubProvider           *gothGithub.Provider
 }
 
-func newServer(client *sftp.Client, logger *slog.Logger, githubClientID, githubClientSecret, sessionKey string) (*server, error) {
+type success struct {
+	Message string
+}
+
+type forbidden struct {
+	Reason string
+}
+
+type orgsTemplateInput struct {
+	Orgs []string
+}
+
+type teamsTemplateInput struct {
+	Org   string
+	Teams []string
+}
+
+func newServer(client *sftp.Client, sftpPrefix string, logger *slog.Logger, githubClientID, githubClientSecret, sessionKey string, isHTTPS bool) (*server, error) {
+	maxAge := 86400 * 30 // 30 days
+	store := sessions.NewCookieStore([]byte(sessionKey))
+	store.MaxAge(maxAge)
+	store.Options.Path = "/"
+	store.Options.HttpOnly = true // HttpOnly should always be enabled
+	store.Options.Secure = isHTTPS
+
 	return &server{
 		client:                   client,
 		logger:                   logger,
@@ -57,8 +88,17 @@ func newServer(client *sftp.Client, logger *slog.Logger, githubClientID, githubC
 		githubUsersMutexMapMutex: sync.Mutex{},
 		githubClientID:           githubClientID,
 		githubClientSecret:       githubClientSecret,
-		cookieStore:              sessions.NewCookieStore([]byte(sessionKey)),
+		cookieStore:              store,
 	}, nil
+}
+
+func arrayContains(array []string, element string) bool {
+	for _, e := range array {
+		if e == element {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) getGithubUser(token string) (*githubUser, error) {
@@ -76,10 +116,13 @@ func (s *server) getGithubUser(token string) (*githubUser, error) {
 	defer userLock.Unlock()
 	var user githubUser
 	var err error
-	if user, ok := s.githubUsers[token]; ok {
+	var ok bool
+	if user, ok = s.githubUsers[token]; ok {
 		if user.MetaDataValidUntil.After(time.Now()) {
+			s.logger.Debug("using cached github user", "user", user)
 			return &user, nil
 		} else {
+			s.logger.Debug("cached github user expired", "user", user)
 			delete(s.githubUsers, token)
 			user, err = getGithubUserFromToken(token)
 			if err != nil {
@@ -89,6 +132,7 @@ func (s *server) getGithubUser(token string) (*githubUser, error) {
 			s.githubUsers[token] = user
 		}
 	} else {
+		s.logger.Debug("no cached github user found")
 		user, err = getGithubUserFromToken(token)
 		if err != nil {
 			s.logger.Error("failed to get github user", "error", err)
@@ -115,16 +159,20 @@ func getGithubUserFromToken(token string) (githubUser, error) {
 		return user, fmt.Errorf("failed to get orgs: %v", err)
 	}
 	for _, org := range orgs {
-		user.Orgs = append(user.Orgs, org.GetName())
+		user.Orgs = append(user.Orgs, org.GetLogin())
 	}
-	user.Teams = []string{}
+	user.Teams = map[string][]string{}
 	teams, _, err := client.Teams.ListUserTeams(context.Background(), nil)
 	if err != nil {
 		return user, fmt.Errorf("failed to get teams: %v", err)
 	}
 	for _, team := range teams {
-		// name of the format org/team or for nested team org/parent_team/team
-		user.Teams = append(user.Teams, team.GetSlug())
+		orgName := team.GetOrganization().GetLogin()
+		teamName := team.GetSlug()
+		if _, ok := user.Teams[orgName]; !ok {
+			user.Teams[orgName] = []string{}
+		}
+		user.Teams[orgName] = append(user.Teams[orgName], teamName)
 	}
 	return user, nil
 }
@@ -138,18 +186,177 @@ func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
 	//  not: list files (only if not in top level '/')
 }
 
+func (s *server) handleForbidden(w http.ResponseWriter, _ *http.Request, reason string) {
+	rawForbidden, err := fs.ReadFile(assets, "assets/templates/forbidden.tmpl")
+	if err != nil {
+		s.logger.Error("failed to read forbidden templates", "error", err)
+		http.Error(w, "failed to read forbidden templates", http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.New("forbidden").Parse(string(rawForbidden))
+	if err != nil {
+		s.logger.Error("failed to parse forbidden templates", "error", err)
+		http.Error(w, "failed to parse forbidden templates", http.StatusInternalServerError)
+		return
+	}
+	data := forbidden{
+		Reason: reason,
+	}
+	w.WriteHeader(http.StatusForbidden)
+	err = tmpl.Execute(w, data)
+	if err != nil {
+		s.logger.Error("failed to execute forbidden templates", "error", err)
+		http.Error(w, "failed to execute forbidden templates", http.StatusInternalServerError)
+		return
+	}
+}
+
 func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
-	// TODO
-	// split path into parts
-	// permission checks:
-	// 1. check if user is logged in, if not forward to login flow
-	// 2. check if user has access to the requested path by splitting it
-	//    parts[1] is the org
-	//    parts[2] is the team (or no team if parts[2] == "_")
-	// check if sftp:$prefix/gh/$path exists
-	// yes: check if is file
-	//  yes: serve it
-	//  not: list files (only if not in top level '/')
+	session, err := s.cookieStore.Get(r, "github")
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			s.logger.Debug("no session found")
+			http.Redirect(w, r, "/oauth/github", http.StatusFound)
+			return
+		}
+		s.logger.Error("failed to get session", "error", err)
+		http.Error(w, "failed to get session", http.StatusInternalServerError)
+		return
+	}
+	accessToken, ok := session.Values["AccessToken"].(string)
+	if !ok {
+		s.logger.Debug("no access token in session")
+		http.Redirect(w, r, "/oauth/github", http.StatusFound)
+		return
+	}
+	user, err := s.getGithubUser(accessToken)
+	if err != nil {
+		s.logger.Error("failed to get github user", "error", err)
+		//http.Error(w, "failed to get github user", http.StatusInternalServerError)
+		// TODO temporary workaround, check for tokenExpired or tokenInvalid errors in the future
+		// and redirect to /oauth/github
+		// if error is another, throw error back at user and into logger
+		http.Redirect(w, r, "/oauth/github", http.StatusFound)
+		return
+	}
+	s.logger.Debug("got github user", "user", user)
+
+	pathParts := strings.Split(strings.TrimSuffix(r.URL.Path[1:], "/"), "/")
+	var org, team string
+	if len(pathParts) > 1 {
+		org = pathParts[1]
+	}
+	if len(pathParts) > 2 {
+		team = pathParts[2]
+	}
+	s.logger.Debug("url parts", "org", org, "team", team, "urlParts", pathParts)
+	if org == "" {
+		if !strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+			return
+		}
+		var orgIntersection []string
+		orgsPath := path.Join(s.sftpPrefix, "github")
+		orgs, err := s.client.ReadDir(orgsPath)
+		if err != nil {
+			s.logger.Error("failed to read orgs", "error", err)
+			http.Error(w, "failed to read orgs", http.StatusInternalServerError)
+			return
+		}
+		for _, org := range orgs {
+			if arrayContains(user.Orgs, org.Name()) {
+				orgIntersection = append(orgIntersection, org.Name())
+			}
+		}
+		rawOrgsTmpl, err := fs.ReadFile(assets, "assets/templates/orgs.tmpl")
+		if err != nil {
+			// TODO precompile and cache templates in RAM
+			s.logger.Error("failed to read orgs templates", "error", err)
+			http.Error(w, "failed to read orgs templates", http.StatusInternalServerError)
+			return
+		}
+		tmpl, err := template.New("orgs").Parse(string(rawOrgsTmpl))
+		if err != nil {
+			s.logger.Error("failed to parse orgs templates", "error", err)
+			http.Error(w, "failed to parse orgs templates", http.StatusInternalServerError)
+			return
+		}
+		data := orgsTemplateInput{
+			Orgs: orgIntersection,
+		}
+		err = tmpl.Execute(w, data)
+		if err != nil {
+			s.logger.Error("failed to execute orgs templates", "error", err)
+			http.Error(w, "failed to execute orgs templates", http.StatusInternalServerError)
+			return
+		}
+		return
+	} else {
+		if !arrayContains(user.Orgs, org) {
+			s.handleForbidden(w, r, "not in org")
+			return
+		}
+	}
+	if team == "" {
+		if !strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+			return
+		}
+		var teamIntersection []string
+		teamsPath := path.Join(s.sftpPrefix, "github", org)
+		teams, err := s.client.ReadDir(teamsPath)
+		if err != nil {
+			if errors.Is(err, sftp.ErrSSHFxNoSuchFile) {
+				// Do not leak existence of org share
+				teams = []os.FileInfo{}
+			} else {
+				s.logger.Error("failed to read teams", "error", err)
+				http.Error(w, "failed to read teams", http.StatusInternalServerError)
+				return
+			}
+		}
+		userTeams := user.Teams[org]
+		for _, team := range teams {
+			if arrayContains(userTeams, team.Name()) {
+				teamIntersection = append(teamIntersection, team.Name())
+			}
+		}
+		rawTeamsTmpl, err := fs.ReadFile(assets, "assets/templates/teams.tmpl")
+		if err != nil {
+			s.logger.Error("failed to read teams templates", "error", err)
+			http.Error(w, "failed to read teams templates", http.StatusInternalServerError)
+			return
+		}
+		tmpl, err := template.New("teams").Parse(string(rawTeamsTmpl))
+		if err != nil {
+			s.logger.Error("failed to parse teams templates", "error", err)
+			http.Error(w, "failed to parse teams templates", http.StatusInternalServerError)
+			return
+		}
+		data := teamsTemplateInput{
+			Org:   org,
+			Teams: teamIntersection,
+		}
+		err = tmpl.Execute(w, data)
+		if err != nil {
+			s.logger.Error("failed to execute teams templates", "error", err)
+			http.Error(w, "failed to execute teams templates", http.StatusInternalServerError)
+			return
+		}
+		return
+	} else if team != "_" {
+		userTeams := user.Teams[org]
+		if !arrayContains(userTeams, team) {
+			s.handleForbidden(w, r, "not in team")
+			return
+		}
+	}
+
+	// TODO do normal file serving and listing, do not follow symlinks though, instead handle them as redirects
+	// (or use _redirects file?)
+	// (or use special name.link file?) (hide .link extension if it does not collide with a real file)
+	//   .link files might either link relative or absolute to the root of the share location
+	// switch to https://github.com/thatoddmailbox/sftpfs for this, so that http.Fs can be used?
 }
 
 func (s *server) handleAsset(w http.ResponseWriter, r *http.Request) {
@@ -162,22 +369,7 @@ func (s *server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.FS(assetFs)).ServeHTTP(w, r)
 }
 
-func (s *server) callbackHandler(w http.ResponseWriter, r *http.Request) {
-	provider := chi.URLParam(r, "provider")
-	q := r.URL.Query()
-	q.Add("provider", provider)
-	r.URL.RawQuery = q.Encode()
-	_, err := gothic.CompleteUserAuth(w, r)
-	if err != nil {
-		s.logger.Error("failed to complete user auth", "error", err)
-		http.Error(w, "failed to complete user auth", http.StatusInternalServerError)
-		return
-	}
-
-	http.Redirect(w, r, "/auth_success", http.StatusTemporaryRedirect)
-}
-
-func (s *server) signInWithProvider(w http.ResponseWriter, r *http.Request) {
+func (s *server) oauthInit(w http.ResponseWriter, r *http.Request) {
 	provider := chi.URLParam(r, "provider")
 	q := r.URL.Query()
 	q.Add("provider", provider)
@@ -186,14 +378,80 @@ func (s *server) signInWithProvider(w http.ResponseWriter, r *http.Request) {
 	gothic.BeginAuthHandler(w, r)
 }
 
+func (s *server) oauthCallback(w http.ResponseWriter, r *http.Request) {
+	provider := chi.URLParam(r, "provider")
+	q := r.URL.Query()
+	q.Add("provider", provider)
+	r.URL.RawQuery = q.Encode()
+	user, err := gothic.CompleteUserAuth(w, r)
+	if err != nil {
+		s.logger.Error("failed to complete user auth", "error", err)
+		http.Error(w, "failed to complete user auth", http.StatusInternalServerError)
+		return
+	}
+
+	session, err := s.cookieStore.New(r, "github")
+	if err != nil {
+		s.logger.Error("failed to create session", "error", err)
+		http.Error(w, "failed to create session", http.StatusInternalServerError)
+		return
+	}
+	session.Values["AccessToken"] = user.AccessToken
+	err = s.cookieStore.Save(r, w, session)
+	if err != nil {
+		s.logger.Error("failed to save session", "error", err)
+		http.Error(w, "failed to save session", http.StatusInternalServerError)
+		return
+	}
+
+	rawSuccessTmpl, err := fs.ReadFile(assets, "assets/templates/success.tmpl")
+	if err != nil {
+		s.logger.Error("failed to read success templates", "error", err)
+		http.Error(w, "failed to read success templates", http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.New("success").Parse(string(rawSuccessTmpl))
+	if err != nil {
+		s.logger.Error("failed to parse success templates", "error", err)
+		http.Error(w, "failed to parse success templates", http.StatusInternalServerError)
+		return
+	}
+	data := success{
+		Message: "Successfully logged in using " + provider,
+	}
+	err = tmpl.Execute(w, data)
+	if err != nil {
+		s.logger.Error("failed to execute success templates", "error", err)
+		http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *server) oauthLogout(w http.ResponseWriter, r *http.Request) {
+	provider := chi.URLParam(r, "provider")
+	q := r.URL.Query()
+	q.Add("provider", provider)
+	r.URL.RawQuery = q.Encode()
+	err := gothic.Logout(w, r)
+	if err != nil {
+		s.logger.Error("failed to logout", "error", err)
+		http.Error(w, "failed to logout", http.StatusInternalServerError)
+		return
+	}
+}
+
 func (s *server) serve(listenAddr string) error {
 	r := chi.NewRouter()
 
+	s.githubProvider = gothGithub.New(
+		s.githubClientID,
+		s.githubClientSecret,
+		"http://localhost:2848/oauth/github/callback",
+		"read:org",
+		"read:user")
+
 	goth.UseProviders(
-		gothGithub.New(
-			s.githubClientID,
-			s.githubClientSecret,
-			"http://localhost:2848/oauth/github/callback"))
+		s.githubProvider)
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -205,33 +463,23 @@ func (s *server) serve(listenAddr string) error {
 	// processing should be stopped.
 	r.Use(middleware.Timeout(60 * time.Second))
 
+	// Serve static assets
 	r.Get("/", s.handleAsset)
 	r.Get("/favicon.ico", s.handleAsset)
-
-	r.Get("/oauth/{provider}/callback", s.callbackHandler)
-	r.Get("/oauth/{provider}", s.signInWithProvider)
-	r.Get("/auth_success", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Header().Set("Content-Type", "text/html")
-		content, err := assets.ReadFile("assets/auth_success.html")
-		if err != nil {
-			http.Error(w, "failed to read asset", http.StatusInternalServerError)
-			s.logger.Error("failed to read asset", "error", err)
-			return
-		}
-		_, err = w.Write(content)
-		if err != nil {
-			http.Error(w, "failed to write response", http.StatusInternalServerError)
-			s.logger.Error("failed to write response", "error", err)
-			return
-		}
-	})
-	// logout
 	r.Get("/robots.txt", s.handleAsset)
 	r.Get("/index.html", s.handleAsset)
 	r.Get("/.well-known/*", s.handleAsset)
 	r.Get("/static/*", s.handleAsset)
+
+	// Handle auth
+	r.Get("/oauth/{provider}", s.oauthInit)
+	r.Get("/oauth/{provider}/callback", s.oauthCallback)
+	r.Get("/oauth/{provider}/logout", s.oauthLogout)
+
+	// Handle shares
 	r.Get("/gh/*", s.ServeGithubShare)
+	r.Get("/gh", s.ServeGithubShare)
 	r.Get("/*", s.ServeShare)
+
 	return http.ListenAndServe(listenAddr, r)
 }
