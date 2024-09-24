@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"github.com/dusted-go/logging/prettylog"
 	"github.com/urfave/cli/v2"
@@ -48,18 +49,28 @@ func main() {
 	}
 	sshDir := path.Join(home, ".ssh")
 
+	defaultLogLevel := os.Getenv("LOG_LEVEL")
+	if defaultLogLevel == "" {
+		defaultLogLevel = "INFO"
+	}
+
+	defaultServerURL := os.Getenv("SERVER_URL")
+	if defaultServerURL == "" {
+		defaultServerURL = "http://localhost:2848"
+	}
+
 	app := &cli.App{
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "remote",
-				Aliases:  []string{"r"},
-				Required: true,
-				Usage:    "sftp remote to connect to",
+				Name:    "remote",
+				Aliases: []string{"r"},
+				Usage:   "sftp remote to connect to",
+				Value:   os.Getenv("SFTP_REMOTE"),
 			},
 			&cli.StringFlag{
 				Name:  "log-level",
 				Usage: "set log level (debug, info, warn, error, fatal, panic)",
-				Value: "info",
+				Value: defaultLogLevel,
 			},
 		},
 		Before: func(context *cli.Context) error {
@@ -84,15 +95,26 @@ func main() {
 				auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
 			}
 
-			if key, err := ssh.ParsePrivateKey([]byte(os.Getenv("SSH_PRIVATE_KEY"))); err == nil {
+			envPrivKey := os.Getenv("SSH_PRIVATE_KEY")
+			if envPrivKey != "" {
+				bytes := make([]byte, base64.StdEncoding.DecodedLen(len(envPrivKey)))
+				_, err := base64.StdEncoding.Decode(bytes, []byte(envPrivKey))
+				if err != nil {
+					logger.Error("failed to decode base64 private key", "error", err)
+					return fmt.Errorf("failed to decode base64 private key: %v", err)
+				}
+				key, err := ssh.ParsePrivateKey(bytes)
+				if err != nil {
+					logger.Error("failed to parse private key", "error", err, "bytesStr", string(bytes))
+					return fmt.Errorf("failed to parse private key: %v", err)
+				}
 				auths = append(auths, ssh.PublicKeys(key))
-			}
-
-			if _, err := os.Stat(path.Join(sshDir, "id_ed25519")); err == nil {
+			} else if _, err := os.Stat(path.Join(sshDir, "id_ed25519")); err == nil {
 				bytes, err := os.ReadFile(path.Join(sshDir, "id_ed25519"))
 				if err != nil {
 					return fmt.Errorf("failed to read private key: %v", err)
 				}
+				logger.Debug("using ed25519 private key", "key", string(bytes))
 				key, err := ssh.ParsePrivateKey(bytes)
 				if err != nil {
 					logger.Error("failed to parse private key", "error", err)
@@ -159,11 +181,17 @@ func main() {
 						Usage: "address to listen on",
 						Value: "0.0.0.0:2848",
 					},
+					&cli.StringFlag{
+						Name:  "server-url",
+						Usage: "URL of the server",
+						Value: defaultServerURL,
+					},
 				},
 				Action: func(cCtx *cli.Context) error {
 					server, err := newServer(
 						client,
 						remotePrefix,
+						cCtx.String("server-url"),
 						logger,
 						os.Getenv("GITHUB_CLIENT_ID"),
 						os.Getenv("GITHUB_CLIENT_SECRET"),

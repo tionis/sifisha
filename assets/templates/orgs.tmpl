@@ -11,12 +11,14 @@
   <body>
     <h1>Orgs</h1>
     <ul>
+        <li><a href="/">🏠 Home</a></li>
       {{range .Orgs}}
-        <li><a href="{{.}}/">{{.}}</a></li>
+        <li><a href="{{.}}/">🏢 {{.}}</a></li>
       {{end}}
     </ul>
-    <div>
-      <a href="/">Home</a>
-    </div>
+    <footer>
+      <a href="/">Go Home</a>
+      <a href="/oauth/github/logout">Logout</a>
+    </footer>
   </body>
 </html>

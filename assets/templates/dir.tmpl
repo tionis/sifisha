@@ -9,8 +9,18 @@
   </head>
 
   <body>
-    <h1>Access Forbidden!</h1>
-    <h2>{{.Reason}}</h2>
+    <h1>{{.CurrentDir}}</h1>
+    <ul>
+      <li><a href="{{ .PathOneLevelUp }}">🔙 Back</a></li>
+      {{range .Dirs}}
+        <li><a href="{{.Name}}/">📁 {{.Name}}</a></li>
+      {{end}}
+    </ul>
+    <ul>
+      {{range .Files}}
+        <li><a href="{{.Target}}/">📄 {{.Name}}</a> <div style="float: right">{{.Size}}</div></li>
+      {{end}}
+    </ul>
     <footer>
       <a href="/">Go Home</a>
     </footer>

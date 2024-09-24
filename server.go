@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"errors"
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/google/go-github/v65/github"
 	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
@@ -19,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,14 +26,6 @@ import (
 
 //go:embed all:assets
 var assets embed.FS
-
-func Assets() (fs.FS, error) {
-	return fs.Sub(assets, "assets")
-}
-
-var (
-	githubMetaDataValidDuration = 5 * time.Minute
-)
 
 type githubUser struct {
 	Name               string
@@ -53,6 +45,7 @@ type server struct {
 	githubClientSecret       string
 	cookieStore              sessions.Store
 	githubProvider           *gothGithub.Provider
+	serverUrl                string
 }
 
 type success struct {
@@ -68,11 +61,59 @@ type orgsTemplateInput struct {
 }
 
 type teamsTemplateInput struct {
-	Org   string
-	Teams []string
+	Org         string
+	Teams       []string
+	NoUserTeams bool
+	ClientID    string
 }
 
-func newServer(client *sftp.Client, sftpPrefix string, logger *slog.Logger, githubClientID, githubClientSecret, sessionKey string, isHTTPS bool) (*server, error) {
+type templateFile struct {
+	Name   string
+	Target string
+	Size   string
+}
+
+type templateFileSlice []templateFile
+
+func (t templateFileSlice) Len() int {
+	return len(t)
+}
+
+func (t templateFileSlice) Less(i, j int) bool {
+	return t[i].Name < t[j].Name
+}
+
+func (t templateFileSlice) Swap(i, j int) {
+	t[i], t[j] = t[j], t[i]
+}
+
+type templateDir struct {
+	Name string
+}
+
+type templateDirSlice []templateDir
+
+func (t templateDirSlice) Len() int {
+	return len(t)
+}
+
+func (t templateDirSlice) Less(i, j int) bool {
+	return t[i].Name < t[j].Name
+}
+
+func (t templateDirSlice) Swap(i, j int) {
+	t[i], t[j] = t[j], t[i]
+}
+
+type dirTemplateInput struct {
+	Files          []templateFile
+	Dirs           []templateDir
+	CurrentPath    string
+	CurrentDir     string
+	PathOneLevelUp string
+}
+
+func newServer(client *sftp.Client, sftpPrefix, serverURL string, logger *slog.Logger, githubClientID, githubClientSecret, sessionKey string, isHTTPS bool) (*server, error) {
 	maxAge := 86400 * 30 // 30 days
 	store := sessions.NewCookieStore([]byte(sessionKey))
 	store.MaxAge(maxAge)
@@ -89,6 +130,7 @@ func newServer(client *sftp.Client, sftpPrefix string, logger *slog.Logger, gith
 		githubClientID:           githubClientID,
 		githubClientSecret:       githubClientSecret,
 		cookieStore:              store,
+		serverUrl:                serverURL,
 	}, nil
 }
 
@@ -101,89 +143,28 @@ func arrayContains(array []string, element string) bool {
 	return false
 }
 
-func (s *server) getGithubUser(token string) (*githubUser, error) {
-	var userLock *sync.Mutex
-	s.githubUsersMutexMapMutex.Lock()
-	if _, ok := s.githubUsersMutexMap[token]; !ok {
-		s.githubUsersMutexMap[token] = &sync.Mutex{}
-		userLock = s.githubUsersMutexMap[token]
-	} else {
-		userLock = s.githubUsersMutexMap[token]
-	}
-	s.githubUsersMutexMapMutex.Unlock()
-
-	userLock.Lock()
-	defer userLock.Unlock()
-	var user githubUser
-	var err error
-	var ok bool
-	if user, ok = s.githubUsers[token]; ok {
-		if user.MetaDataValidUntil.After(time.Now()) {
-			s.logger.Debug("using cached github user", "user", user)
-			return &user, nil
-		} else {
-			s.logger.Debug("cached github user expired", "user", user)
-			delete(s.githubUsers, token)
-			user, err = getGithubUserFromToken(token)
-			if err != nil {
-				s.logger.Error("failed to get github user", "error", err)
-				return nil, fmt.Errorf("failed to get github user: %v", err)
-			}
-			s.githubUsers[token] = user
-		}
-	} else {
-		s.logger.Debug("no cached github user found")
-		user, err = getGithubUserFromToken(token)
-		if err != nil {
-			s.logger.Error("failed to get github user", "error", err)
-			return nil, fmt.Errorf("failed to get github user: %v", err)
-		}
-		s.githubUsers[token] = user
-	}
-	return &user, nil
-}
-
-func getGithubUserFromToken(token string) (githubUser, error) {
-	user := githubUser{
-		MetaDataValidUntil: time.Now().Add(githubMetaDataValidDuration),
-	}
-	client := github.NewClient(nil).WithAuthToken(token)
-	fetchedUser, _, err := client.Users.Get(context.Background(), "")
-	if err != nil {
-		return user, fmt.Errorf("failed to get user: %v", err)
-	}
-	user.Name = fetchedUser.GetName()
-	user.Orgs = []string{}
-	orgs, _, err := client.Organizations.List(context.Background(), user.Name, nil)
-	if err != nil {
-		return user, fmt.Errorf("failed to get orgs: %v", err)
-	}
-	for _, org := range orgs {
-		user.Orgs = append(user.Orgs, org.GetLogin())
-	}
-	user.Teams = map[string][]string{}
-	teams, _, err := client.Teams.ListUserTeams(context.Background(), nil)
-	if err != nil {
-		return user, fmt.Errorf("failed to get teams: %v", err)
-	}
-	for _, team := range teams {
-		orgName := team.GetOrganization().GetLogin()
-		teamName := team.GetSlug()
-		if _, ok := user.Teams[orgName]; !ok {
-			user.Teams[orgName] = []string{}
-		}
-		user.Teams[orgName] = append(user.Teams[orgName], teamName)
-	}
-	return user, nil
-}
+var forbiddenPaths = regexp.MustCompile(`^/users\.json$|^/.*/auth\.yml$`)
 
 func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
+	if forbiddenPaths.MatchString(r.URL.Path) {
+		s.handleForbidden(w, r, "access forbidden")
+		return
+	}
+
 	// TODO
 	// split path into parts
+
 	// check if sftp:$prefix/share/$path exists
 	// yes: check if is file
 	//  yes: serve it
-	//  not: list files (only if not in top level '/')
+	//  not: list files (redirect to $path/ if not already)
+
+	pathParts := splitPath(r.URL.Path)
+	var aclFiles []string
+	for i := len(pathParts); i > 0; i-- {
+		aclFiles = append(aclFiles, path.Join(s.sftpPrefix, path.Join(pathParts[:i]...), ".auth"))
+	}
+	// check aclFile
 }
 
 func (s *server) handleForbidden(w http.ResponseWriter, _ *http.Request, reason string) {
@@ -333,9 +314,15 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to parse teams templates", http.StatusInternalServerError)
 			return
 		}
+		userTeamCount := 0
+		for _, teams := range user.Teams {
+			userTeamCount += len(teams)
+		}
 		data := teamsTemplateInput{
-			Org:   org,
-			Teams: teamIntersection,
+			Org:         org,
+			Teams:       teamIntersection,
+			NoUserTeams: userTeamCount == 0,
+			ClientID:    s.githubClientID,
 		}
 		err = tmpl.Execute(w, data)
 		if err != nil {
@@ -352,18 +339,154 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TODO do normal file serving and listing, do not follow symlinks though, instead handle them as redirects
-	// (or use _redirects file?)
-	// (or use special name.link file?) (hide .link extension if it does not collide with a real file)
-	//   .link files might either link relative or absolute to the root of the share location
-	// switch to https://github.com/thatoddmailbox/sftpfs for this, so that http.Fs can be used?
+	filePath := path.Join(s.sftpPrefix, "github", org, team, path.Join(pathParts[3:]...))
+	stat, err := s.client.Stat(filePath)
+	if err != nil {
+		s.logger.Error("failed to stat filePath", "filePath", filePath, "error", err)
+		http.Error(w, "failed to stat filePath", http.StatusInternalServerError)
+		return
+	}
+	var doFileListing bool
+	if stat.IsDir() {
+		if !strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+			return
+		}
+		_, err := s.client.Stat(path.Join(filePath, "index.html"))
+		if err != nil {
+			doFileListing = true
+		} else {
+			filePath = path.Join(filePath, "index.html")
+		}
+	}
+	if doFileListing {
+		files, err := s.client.ReadDir(filePath)
+		if err != nil {
+			s.logger.Error("failed to read dir", "filePath", filePath, "error", err)
+			http.Error(w, "failed to read dir", http.StatusInternalServerError)
+			return
+		}
+		rawDirTmpl, err := fs.ReadFile(assets, "assets/templates/dir.tmpl")
+		if err != nil {
+			s.logger.Error("failed to read dir templates", "error", err)
+			http.Error(w, "failed to read dir templates", http.StatusInternalServerError)
+			return
+		}
+		tmpl, err := template.New("dir").Parse(string(rawDirTmpl))
+		if err != nil {
+			s.logger.Error("failed to parse dir templates", "error", err)
+			http.Error(w, "failed to parse dir templates", http.StatusInternalServerError)
+			return
+		}
+
+		var templateFiles templateFileSlice
+		var templateDirs templateDirSlice
+		for _, file := range files {
+			name := file.Name()
+			if name != "auth.yml" {
+				if file.IsDir() {
+					templateDirs = append(templateDirs, templateDir{
+						Name: name,
+					})
+				} else {
+					if strings.HasSuffix(name, ".link") {
+						target, err := s.client.OpenFile(path.Join(filePath, name), os.O_RDONLY)
+						defer func(target *sftp.File) {
+							err := target.Close()
+							if err != nil {
+								s.logger.Error("failed to close link file", "error", err)
+							}
+						}(target)
+						if err != nil {
+							s.logger.Error("failed to open link file", "error", err)
+							http.Error(w, "failed to open link file", http.StatusInternalServerError)
+							return
+						}
+						targetBytes := make([]byte, file.Size())
+						_, err = target.Read(targetBytes)
+						if err != nil {
+							s.logger.Error("failed to read link file", "error", err)
+							http.Error(w, "failed to read link file", http.StatusInternalServerError)
+							return
+						}
+						templateFiles = append(templateFiles, templateFile{
+							Name:   name,
+							Size:   ByteCountIEC(file.Size()),
+							Target: string(targetBytes)})
+					} else {
+						templateFiles = append(templateFiles, templateFile{
+							Name:   name,
+							Size:   ByteCountIEC(file.Size()),
+							Target: name,
+						})
+					}
+				}
+			}
+		}
+
+		// sort file and dir lists
+		sort.Sort(&templateFiles)
+		sort.Sort(&templateDirs)
+
+		data := dirTemplateInput{
+			Files:          templateFiles,
+			Dirs:           templateDirs,
+			CurrentDir:     pathParts[len(pathParts)-1],
+			CurrentPath:    r.URL.Path,
+			PathOneLevelUp: path.Join(r.URL.Path, ".."),
+		}
+		err = tmpl.Execute(w, data)
+		if err != nil {
+			s.logger.Error("failed to execute dir templates", "error", err)
+			http.Error(w, "failed to execute dir templates", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if strings.HasSuffix(r.URL.Path, ".link") {
+			target, err := s.client.OpenFile(filePath, os.O_RDONLY)
+			defer func(target *sftp.File) {
+				err := target.Close()
+				if err != nil {
+					s.logger.Error("failed to close link file", "error", err)
+				}
+			}(target)
+			if err != nil {
+				s.logger.Error("failed to open link file", "error", err)
+				http.Error(w, "failed to open link file", http.StatusInternalServerError)
+				return
+			}
+			targetBytes := make([]byte, stat.Size())
+			_, err = target.Read(targetBytes)
+			if err != nil {
+				s.logger.Error("failed to read link file", "error", err)
+				http.Error(w, "failed to read link file", http.StatusInternalServerError)
+				return
+			}
+			http.Redirect(w, r, string(targetBytes), http.StatusFound)
+			return
+		}
+
+		file, err := s.client.OpenFile(filePath, os.O_RDONLY)
+		defer func(file *sftp.File) {
+			err := file.Close()
+			if err != nil {
+				s.logger.Error("failed to close file", "error", err)
+			}
+		}(file)
+		if err != nil {
+			s.logger.Error("failed to open file", "error", err)
+			http.Error(w, "failed to open file", http.StatusInternalServerError)
+			return
+		}
+		http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
+	}
 }
 
 func (s *server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	assetFs, err := fs.Sub(assets, "assets")
 	if err != nil {
 		s.logger.Error("failed to get asset fs", "error", err)
-		http.Error(w, "failed to get asset fs", http.StatusInternalServerError)
+		http.Error(w, "failed to get https://github.com/thatoddmailbox/sftpfsasset fs", http.StatusInternalServerError)
 		return
 	}
 	http.FileServer(http.FS(assetFs)).ServeHTTP(w, r)
@@ -438,6 +561,81 @@ func (s *server) oauthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to logout", http.StatusInternalServerError)
 		return
 	}
+
+	session, err := s.cookieStore.Get(r, provider)
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			s.logger.Debug("no session found")
+			http.Redirect(w, r, "/oauth/"+provider, http.StatusFound)
+			return
+		}
+		s.logger.Error("failed to get session", "error", err)
+		http.Error(w, "failed to get session", http.StatusInternalServerError)
+		return
+	}
+	session.Options.MaxAge = -1
+
+	err = s.cookieStore.Save(r, w, session)
+	if err != nil {
+		s.logger.Error("failed to save session", "error", err)
+		http.Error(w, "failed to save session", http.StatusInternalServerError)
+		return
+	}
+
+	rawTemplate, err := fs.ReadFile(assets, "assets/templates/success.tmpl")
+	if err != nil {
+		s.logger.Error("failed to read success templates", "error", err)
+		http.Error(w, "failed to read success templates", http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.New("success").Parse(string(rawTemplate))
+	if err != nil {
+		s.logger.Error("failed to parse success templates", "error", err)
+		http.Error(w, "failed to parse success templates", http.StatusInternalServerError)
+		return
+	}
+	data := success{
+		Message: "Successfully logged out of " + provider,
+	}
+	err = tmpl.Execute(w, data)
+	if err != nil {
+		s.logger.Error("failed to execute success templates", "error", err)
+		http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *server) githubUserInfo(w http.ResponseWriter, r *http.Request) {
+	session, err := s.cookieStore.Get(r, "github")
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			s.logger.Debug("no session found")
+			http.Error(w, "no session found", http.StatusUnauthorized)
+			return
+		}
+		s.logger.Error("failed to get session", "error", err)
+		http.Error(w, "failed to get session", http.StatusInternalServerError)
+		return
+	}
+	accessToken, ok := session.Values["AccessToken"].(string)
+	if !ok {
+		s.logger.Debug("no access token in session")
+		http.Error(w, "no access token in session", http.StatusUnauthorized)
+		return
+	}
+	user, err := s.getGithubUser(accessToken)
+	if err != nil {
+		s.logger.Error("failed to get github user", "error", err)
+		http.Error(w, "failed to get github user", http.StatusInternalServerError)
+		return
+	}
+	s.logger.Debug("got github user", "user", user)
+	_, err = w.Write([]byte(fmt.Sprint("User: ", user.Name, "\nOrgs: ", user.Orgs, "\nTeams: ", user.Teams)))
+	if err != nil {
+		s.logger.Error("failed to write response", "error", err)
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (s *server) serve(listenAddr string) error {
@@ -446,7 +644,7 @@ func (s *server) serve(listenAddr string) error {
 	s.githubProvider = gothGithub.New(
 		s.githubClientID,
 		s.githubClientSecret,
-		"http://localhost:2848/oauth/github/callback",
+		s.serverUrl+"/oauth/github/callback",
 		"read:org",
 		"read:user")
 
@@ -475,6 +673,7 @@ func (s *server) serve(listenAddr string) error {
 	r.Get("/oauth/{provider}", s.oauthInit)
 	r.Get("/oauth/{provider}/callback", s.oauthCallback)
 	r.Get("/oauth/{provider}/logout", s.oauthLogout)
+	r.Get("/info/github/user", s.githubUserInfo)
 
 	// Handle shares
 	r.Get("/gh/*", s.ServeGithubShare)

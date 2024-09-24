@@ -1,0 +1,95 @@
+# flyctl launch added from .gitignore
+**/.idea
+**/sifisha
+
+# flyctl launch added from .idea/.gitignore
+# Default ignored files
+.idea/shelf
+.idea/workspace.xml
+# Editor-based HTTP Client requests
+.idea/httpRequests
+# Datasource local storage ignored files
+.idea/dataSources
+.idea/dataSources.local.xml
+
+# flyctl launch added from vendor/github.com/go-chi/chi/v5/.gitignore
+vendor/github.com/go-chi/chi/v5/**/.idea
+vendor/github.com/go-chi/chi/v5/**/*.sw?
+vendor/github.com/go-chi/chi/v5/**/.vscode
+
+# flyctl launch added from vendor/github.com/gorilla/securecookie/.gitignore
+vendor/github.com/gorilla/securecookie/**/coverage.coverprofile
+
+# flyctl launch added from vendor/github.com/gorilla/sessions/.gitignore
+vendor/github.com/gorilla/sessions/**/coverage.coverprofile
+
+# flyctl launch added from vendor/github.com/markbates/goth/.gitignore
+vendor/github.com/markbates/goth/**/*.log
+vendor/github.com/markbates/goth/**/.DS_Store
+vendor/github.com/markbates/goth/**/doc
+vendor/github.com/markbates/goth/**/tmp
+vendor/github.com/markbates/goth/**/pkg
+vendor/github.com/markbates/goth/**/*.gem
+vendor/github.com/markbates/goth/**/*.pid
+vendor/github.com/markbates/goth/**/coverage
+vendor/github.com/markbates/goth/**/coverage.data
+vendor/github.com/markbates/goth/**/build/*
+vendor/github.com/markbates/goth/**/*.pbxuser
+vendor/github.com/markbates/goth/**/*.mode1v3
+vendor/github.com/markbates/goth/**/.svn
+vendor/github.com/markbates/goth/**/profile
+vendor/github.com/markbates/goth/**/.console_history
+vendor/github.com/markbates/goth/**/.sass-cache/*
+vendor/github.com/markbates/goth/**/.rake_tasks~
+vendor/github.com/markbates/goth/**/*.log.lck
+vendor/github.com/markbates/goth/**/solr
+vendor/github.com/markbates/goth/**/.jhw-cache
+vendor/github.com/markbates/goth/**/jhw.*
+vendor/github.com/markbates/goth/**/*.sublime*
+vendor/github.com/markbates/goth/**/node_modules
+vendor/github.com/markbates/goth/**/dist
+vendor/github.com/markbates/goth/**/generated
+vendor/github.com/markbates/goth/**/.vendor
+vendor/github.com/markbates/goth/**/*.swp
+vendor/github.com/markbates/goth/**/.vscode/launch.json
+vendor/github.com/markbates/goth/**/.vscode/settings.json
+vendor/github.com/markbates/goth/**/.idea
+
+# flyctl launch added from vendor/github.com/pkg/sftp/.gitignore
+vendor/github.com/pkg/sftp/**/.*.swo
+vendor/github.com/pkg/sftp/**/.*.swp
+
+vendor/github.com/pkg/sftp/**/server_standalone/server_standalone
+
+vendor/github.com/pkg/sftp/**/examples/*/id_rsa
+vendor/github.com/pkg/sftp/**/examples/*/id_rsa.pub
+
+vendor/github.com/pkg/sftp/**/memprofile.out
+vendor/github.com/pkg/sftp/**/memprofile.svg
+
+# flyctl launch added from vendor/github.com/russross/blackfriday/v2/.gitignore
+vendor/github.com/russross/blackfriday/v2/**/*.out
+vendor/github.com/russross/blackfriday/v2/**/*.swp
+vendor/github.com/russross/blackfriday/v2/**/*.8
+vendor/github.com/russross/blackfriday/v2/**/*.6
+vendor/github.com/russross/blackfriday/v2/**/_obj
+vendor/github.com/russross/blackfriday/v2/**/_test*
+vendor/github.com/russross/blackfriday/v2/**/markdown
+vendor/github.com/russross/blackfriday/v2/**/tags
+
+# flyctl launch added from vendor/github.com/urfave/cli/v2/.gitignore
+vendor/github.com/urfave/cli/v2/**/*.coverprofile
+vendor/github.com/urfave/cli/v2/**/*.exe
+vendor/github.com/urfave/cli/v2/**/*.orig
+vendor/github.com/urfave/cli/v2/**/.*envrc
+vendor/github.com/urfave/cli/v2/**/.envrc
+vendor/github.com/urfave/cli/v2/**/.idea
+# goimports is installed here if not available
+vendor/github.com/urfave/cli/v2/.local
+vendor/github.com/urfave/cli/v2/site
+vendor/github.com/urfave/cli/v2/**/coverage.txt
+vendor/github.com/urfave/cli/v2/**/internal/*/built-example
+vendor/github.com/urfave/cli/v2/**/vendor
+vendor/github.com/urfave/cli/v2/cmd/urfave-cli-genflags/urfave-cli-genflags
+vendor/github.com/urfave/cli/v2/**/*.exe
+fly.toml

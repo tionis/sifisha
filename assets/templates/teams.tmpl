@@ -10,13 +10,19 @@
 
   <body>
     <h1>{{.Org}}</h1>
+    {{ if .NoUserTeams }}
+      <p> It seems you are either not a member of any team in this organization,
+        or you have to grant this site access to this organization under
+        the <a href="https://github.com/settings/connections/applications/{{.ClientID}}">GitHub settings</a>.</p>
+    {{ end }}
     <ul>
+      <li><a href="/gh/">🔙 Back</a></li>
       {{range .Teams}}
-        <li><a href="{{.}}/">{{.}}</a></li>
+        <li><a href="{{.}}/">🫂 {{.}}</a></li>
       {{end}}
     </ul>
-    <div>
-      <a href="/">Home</a>
-    </div>
+    <footer>
+      <a href="/">Go Home</a>
+    </footer>
   </body>
 </html>
