@@ -13,7 +13,9 @@ import (
 	"github.com/markbates/goth/gothic"
 	gothGithub "github.com/markbates/goth/providers/github"
 	"github.com/pkg/sftp"
+	"github.com/russross/blackfriday/v2"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -75,6 +77,11 @@ type teamsTemplateInput struct {
 	Teams       []string
 	NoUserTeams bool
 	ClientID    string
+}
+
+type baseTemplateInput struct {
+	Title string
+	Body  template.HTML
 }
 
 type templateFile struct {
@@ -344,7 +351,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		return
-	} else if team != "_" {
+	} else {
 		userTeams := user.Teams[org]
 		if !arrayContains(userTeams, team) {
 			s.handleForbidden(w, r, "not in team")
@@ -360,7 +367,12 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err := s.client.Stat(path.Join(filePath, "index.html"))
 		if err != nil {
-			doFileListing = true
+			_, err := s.client.Stat(path.Join(filePath, "index.md"))
+			if err != nil {
+				doFileListing = true
+			} else {
+				filePath = path.Join(filePath, "index.md")
+			}
 		} else {
 			filePath = path.Join(filePath, "index.html")
 		}
@@ -396,8 +408,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 							http.Error(w, "failed to open link file", http.StatusInternalServerError)
 							return
 						}
-						targetBytes := make([]byte, file.Size())
-						_, err = target.Read(targetBytes)
+						targetBytes, err := io.ReadAll(target)
 						if err != nil {
 							s.logger.Error("failed to read link file", "error", err)
 							http.Error(w, "failed to read link file", http.StatusInternalServerError)
@@ -449,8 +460,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "failed to open link file", http.StatusInternalServerError)
 				return
 			}
-			targetBytes := make([]byte, stat.Size())
-			_, err = target.Read(targetBytes)
+			targetBytes, err := io.ReadAll(target)
 			if err != nil {
 				s.logger.Error("failed to read link file", "error", err)
 				http.Error(w, "failed to read link file", http.StatusInternalServerError)
@@ -472,7 +482,22 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to open file", http.StatusInternalServerError)
 			return
 		}
-		http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
+
+		if strings.HasSuffix(filePath, ".md") {
+			fileBytes, err := io.ReadAll(file)
+			if err != nil {
+				s.logger.Error("failed to read file", "error", err)
+				http.Error(w, "failed to read file", http.StatusInternalServerError)
+				return
+			}
+			output := blackfriday.Run(fileBytes)
+			err = s.templates["base.tmpl"].Execute(w, baseTemplateInput{
+				Title: path.Base(filePath),
+				Body:  template.HTML(output),
+			})
+		} else {
+			http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
+		}
 	}
 }
 

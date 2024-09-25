@@ -63,7 +63,7 @@ func getGithubUserFromToken(token string) (githubUser, error) {
 	if err != nil {
 		return user, fmt.Errorf("failed to get user: %v", err)
 	}
-	
+
 	user.Name = fetchedUser.GetName()
 	user.Orgs = []string{}
 	orgs, _, err := client.Organizations.List(context.Background(), user.Name, nil)
@@ -85,6 +85,9 @@ func getGithubUserFromToken(token string) (githubUser, error) {
 			user.Teams[orgName] = []string{}
 		}
 		user.Teams[orgName] = append(user.Teams[orgName], teamName)
+	}
+	for orgName, _ := range user.Teams {
+		user.Teams[orgName] = append(user.Teams[orgName], "@all")
 	}
 	return user, nil
 }
