@@ -540,12 +540,12 @@ func (s *server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 			ShowData: false,
 			Data:     "",
 		}
-		err = s.templates["callback_success.tmpl"].Execute(w, data)
-		if err != nil {
-			s.logger.Error("failed to execute success templates", "error", err)
-			http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
-			return
-		}
+	}
+	err = s.templates["callback_success.tmpl"].Execute(w, data)
+	if err != nil {
+		s.logger.Error("failed to execute success templates", "error", err)
+		http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
+		return
 	}
 }
 
