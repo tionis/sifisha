@@ -191,19 +191,183 @@ func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO
-	// split path into parts
-	// check if sftp:$prefix/share/$path exists
-	// yes: check if is file
-	//  yes: serve it
-	//  not: list files (redirect to $path/ if not already) (do not list files in the root)
+	//pathParts := splitPath(r.URL.Path)
+	//var aclFiles []string
+	//for i := len(pathParts); i > 0; i-- {
+	//	aclFiles = append(aclFiles, path.Join(s.sftpPrefix, path.Join(pathParts[:i]...), ".auth"))
+	//}
+	//s.logger.Debug("aclFiles", "aclFiles", aclFiles)
 
-	pathParts := splitPath(r.URL.Path)
-	var aclFiles []string
-	for i := len(pathParts); i > 0; i-- {
-		aclFiles = append(aclFiles, path.Join(s.sftpPrefix, path.Join(pathParts[:i]...), ".auth"))
+	filePath := path.Join(s.sftpPrefix, strings.TrimPrefix(r.URL.Path, "/"))
+	stat, err := s.client.Stat(filePath)
+	if err != nil {
+		s.logger.Error("failed to stat filePath", "filePath", filePath, "error", err)
+		s.handleForbidden(w, r, "not found")
+		return
 	}
-	// check aclFile
+
+	realPath, err := s.client.RealPath(filePath)
+	if err != nil {
+		s.logger.Error("failed to get real path", "error", err)
+		s.handleForbidden(w, r, "not found")
+		return
+	}
+	sftpWD, err := s.client.Getwd()
+	if err != nil {
+		s.logger.Error("failed to get working directory", "error", err)
+		http.Error(w, "failed to get working directory", http.StatusInternalServerError)
+		return
+	}
+	fullRemotePrefix := path.Join(sftpWD, s.sftpPrefix)
+	realFilePath := strings.TrimPrefix(realPath, fullRemotePrefix)
+
+	s.logger.Debug("url parts", "urlPath", r.URL.Path, "realPath", realPath, "fullRemotePrefix", fullRemotePrefix, "realFilePath", realFilePath)
+
+	if realFilePath == "/share" {
+		s.handleForbidden(w, r, "not found")
+		return
+	}
+
+	var doFileListing bool
+	if stat.IsDir() {
+		if !strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+			return
+		}
+		_, err := s.client.Stat(path.Join(filePath, "index.html"))
+		if err != nil {
+			_, err := s.client.Stat(path.Join(filePath, "index.md"))
+			if err != nil {
+				doFileListing = true
+			} else {
+				filePath = path.Join(filePath, "index.md")
+			}
+		} else {
+			filePath = path.Join(filePath, "index.html")
+		}
+	}
+	if doFileListing {
+		files, err := s.client.ReadDir(filePath)
+		if err != nil {
+			s.logger.Error("failed to read dir", "filePath", filePath, "error", err)
+			http.Error(w, "failed to read dir", http.StatusInternalServerError)
+			return
+		}
+
+		var templateFiles templateFileSlice
+		var templateDirs templateDirSlice
+		for _, file := range files {
+			name := file.Name()
+			if name != "auth.yml" {
+				if file.IsDir() {
+					templateDirs = append(templateDirs, templateDir{
+						Name: name,
+					})
+				} else {
+					if strings.HasSuffix(name, ".link") {
+						target, err := s.client.OpenFile(path.Join(filePath, name), os.O_RDONLY)
+						defer func(target *sftp.File) {
+							err := target.Close()
+							if err != nil {
+								s.logger.Error("failed to close link file", "error", err)
+							}
+						}(target)
+						if err != nil {
+							s.logger.Error("failed to open link file", "error", err)
+							http.Error(w, "failed to open link file", http.StatusInternalServerError)
+							return
+						}
+						targetBytes, err := io.ReadAll(target)
+						if err != nil {
+							s.logger.Error("failed to read link file", "error", err)
+							http.Error(w, "failed to read link file", http.StatusInternalServerError)
+							return
+						}
+						templateFiles = append(templateFiles, templateFile{
+							Name:   name,
+							Size:   ByteCountIEC(file.Size()),
+							Target: string(targetBytes)})
+					} else {
+						templateFiles = append(templateFiles, templateFile{
+							Name:   name,
+							Size:   ByteCountIEC(file.Size()),
+							Target: name,
+						})
+					}
+				}
+			}
+		}
+
+		// sort file and dir lists
+		sort.Sort(&templateFiles)
+		sort.Sort(&templateDirs)
+
+		data := dirTemplateInput{
+			Files:          templateFiles,
+			Dirs:           templateDirs,
+			CurrentDir:     path.Base(filePath),
+			CurrentPath:    r.URL.Path,
+			PathOneLevelUp: path.Join(r.URL.Path, ".."),
+		}
+		err = s.templates["dir.tmpl"].Execute(w, data)
+		if err != nil {
+			s.logger.Error("failed to execute dir templates", "error", err)
+			http.Error(w, "failed to execute dir templates", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if strings.HasSuffix(r.URL.Path, ".link") {
+			target, err := s.client.OpenFile(filePath, os.O_RDONLY)
+			defer func(target *sftp.File) {
+				err := target.Close()
+				if err != nil {
+					s.logger.Error("failed to close link file", "error", err)
+				}
+			}(target)
+			if err != nil {
+				s.logger.Error("failed to open link file", "error", err)
+				http.Error(w, "failed to open link file", http.StatusInternalServerError)
+				return
+			}
+			targetBytes, err := io.ReadAll(target)
+			if err != nil {
+				s.logger.Error("failed to read link file", "error", err)
+				http.Error(w, "failed to read link file", http.StatusInternalServerError)
+				return
+			}
+			http.Redirect(w, r, string(targetBytes), http.StatusFound)
+			return
+		}
+
+		file, err := s.client.OpenFile(filePath, os.O_RDONLY)
+		defer func(file *sftp.File) {
+			err := file.Close()
+			if err != nil {
+				s.logger.Error("failed to close file", "error", err)
+			}
+		}(file)
+		if err != nil {
+			s.logger.Error("failed to open file", "error", err)
+			http.Error(w, "failed to open file", http.StatusInternalServerError)
+			return
+		}
+
+		if strings.HasSuffix(filePath, ".md") {
+			fileBytes, err := io.ReadAll(file)
+			if err != nil {
+				s.logger.Error("failed to read file", "error", err)
+				http.Error(w, "failed to read file", http.StatusInternalServerError)
+				return
+			}
+			output := blackfriday.Run(fileBytes)
+			err = s.templates["base.tmpl"].Execute(w, baseTemplateInput{
+				Title: path.Base(filePath),
+				Body:  template.HTML(output),
+			})
+		} else {
+			http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
+		}
+	}
 }
 
 func (s *server) handleForbidden(w http.ResponseWriter, _ *http.Request, reason string) {
