@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/go-chi/chi/v5"
@@ -46,10 +48,18 @@ type server struct {
 	cookieStore              sessions.Store
 	githubProvider           *gothGithub.Provider
 	serverUrl                string
+	templates                map[string]*template.Template
+	DebugMode                bool
 }
 
 type success struct {
 	Message string
+}
+
+type callbackSuccess struct {
+	Message  string
+	ShowData bool
+	Data     string
 }
 
 type forbidden struct {
@@ -121,6 +131,26 @@ func newServer(client *sftp.Client, sftpPrefix, serverURL string, logger *slog.L
 	store.Options.HttpOnly = true // HttpOnly should always be enabled
 	store.Options.Secure = isHTTPS
 
+	templateMap := make(map[string]*template.Template)
+	rawDirTmpl, err := fs.ReadDir(assets, "assets/templates")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read templates directory: %w", err)
+	}
+	for _, file := range rawDirTmpl {
+		if file.IsDir() {
+			continue
+		}
+		rawTemplate, err := fs.ReadFile(assets, path.Join("assets/templates", file.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read template %s: %w", file.Name(), err)
+		}
+		tmpl, err := template.New(file.Name()).Parse(string(rawTemplate))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse template %s: %w", file.Name(), err)
+		}
+		templateMap[file.Name()] = tmpl
+	}
+
 	return &server{
 		client:                   client,
 		logger:                   logger,
@@ -131,6 +161,9 @@ func newServer(client *sftp.Client, sftpPrefix, serverURL string, logger *slog.L
 		githubClientSecret:       githubClientSecret,
 		cookieStore:              store,
 		serverUrl:                serverURL,
+		templates:                templateMap,
+		sftpPrefix:               sftpPrefix,
+		DebugMode:                logger.Enabled(context.Background(), slog.LevelDebug),
 	}, nil
 }
 
@@ -153,11 +186,10 @@ func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
 
 	// TODO
 	// split path into parts
-
 	// check if sftp:$prefix/share/$path exists
 	// yes: check if is file
 	//  yes: serve it
-	//  not: list files (redirect to $path/ if not already)
+	//  not: list files (redirect to $path/ if not already) (do not list files in the root)
 
 	pathParts := splitPath(r.URL.Path)
 	var aclFiles []string
@@ -168,23 +200,8 @@ func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleForbidden(w http.ResponseWriter, _ *http.Request, reason string) {
-	rawForbidden, err := fs.ReadFile(assets, "assets/templates/forbidden.tmpl")
-	if err != nil {
-		s.logger.Error("failed to read forbidden templates", "error", err)
-		http.Error(w, "failed to read forbidden templates", http.StatusInternalServerError)
-		return
-	}
-	tmpl, err := template.New("forbidden").Parse(string(rawForbidden))
-	if err != nil {
-		s.logger.Error("failed to parse forbidden templates", "error", err)
-		http.Error(w, "failed to parse forbidden templates", http.StatusInternalServerError)
-		return
-	}
-	data := forbidden{
-		Reason: reason,
-	}
 	w.WriteHeader(http.StatusForbidden)
-	err = tmpl.Execute(w, data)
+	err := s.templates["forbidden.tmpl"].Execute(w, forbidden{Reason: reason})
 	if err != nil {
 		s.logger.Error("failed to execute forbidden templates", "error", err)
 		http.Error(w, "failed to execute forbidden templates", http.StatusInternalServerError)
@@ -212,11 +229,6 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.getGithubUser(accessToken)
 	if err != nil {
-		s.logger.Error("failed to get github user", "error", err)
-		//http.Error(w, "failed to get github user", http.StatusInternalServerError)
-		// TODO temporary workaround, check for tokenExpired or tokenInvalid errors in the future
-		// and redirect to /oauth/github
-		// if error is another, throw error back at user and into logger
 		http.Redirect(w, r, "/oauth/github", http.StatusFound)
 		return
 	}
@@ -278,23 +290,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 				orgIntersection = append(orgIntersection, org.Name())
 			}
 		}
-		rawOrgsTmpl, err := fs.ReadFile(assets, "assets/templates/orgs.tmpl")
-		if err != nil {
-			// TODO precompile and cache templates in RAM
-			s.logger.Error("failed to read orgs templates", "error", err)
-			http.Error(w, "failed to read orgs templates", http.StatusInternalServerError)
-			return
-		}
-		tmpl, err := template.New("orgs").Parse(string(rawOrgsTmpl))
-		if err != nil {
-			s.logger.Error("failed to parse orgs templates", "error", err)
-			http.Error(w, "failed to parse orgs templates", http.StatusInternalServerError)
-			return
-		}
-		data := orgsTemplateInput{
-			Orgs: orgIntersection,
-		}
-		err = tmpl.Execute(w, data)
+		err = s.templates["orgs.tmpl"].Execute(w, orgsTemplateInput{Orgs: orgIntersection})
 		if err != nil {
 			s.logger.Error("failed to execute orgs templates", "error", err)
 			http.Error(w, "failed to execute orgs templates", http.StatusInternalServerError)
@@ -332,29 +328,16 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 				teamIntersection = append(teamIntersection, team.Name())
 			}
 		}
-		rawTeamsTmpl, err := fs.ReadFile(assets, "assets/templates/teams.tmpl")
-		if err != nil {
-			s.logger.Error("failed to read teams templates", "error", err)
-			http.Error(w, "failed to read teams templates", http.StatusInternalServerError)
-			return
-		}
-		tmpl, err := template.New("teams").Parse(string(rawTeamsTmpl))
-		if err != nil {
-			s.logger.Error("failed to parse teams templates", "error", err)
-			http.Error(w, "failed to parse teams templates", http.StatusInternalServerError)
-			return
-		}
 		userTeamCount := 0
 		for _, teams := range user.Teams {
 			userTeamCount += len(teams)
 		}
-		data := teamsTemplateInput{
+		err = s.templates["teams.tmpl"].Execute(w, teamsTemplateInput{
 			Org:         org,
 			Teams:       teamIntersection,
 			NoUserTeams: userTeamCount == 0,
 			ClientID:    s.githubClientID,
-		}
-		err = tmpl.Execute(w, data)
+		})
 		if err != nil {
 			s.logger.Error("failed to execute teams templates", "error", err)
 			http.Error(w, "failed to execute teams templates", http.StatusInternalServerError)
@@ -387,18 +370,6 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.logger.Error("failed to read dir", "filePath", filePath, "error", err)
 			http.Error(w, "failed to read dir", http.StatusInternalServerError)
-			return
-		}
-		rawDirTmpl, err := fs.ReadFile(assets, "assets/templates/dir.tmpl")
-		if err != nil {
-			s.logger.Error("failed to read dir templates", "error", err)
-			http.Error(w, "failed to read dir templates", http.StatusInternalServerError)
-			return
-		}
-		tmpl, err := template.New("dir").Parse(string(rawDirTmpl))
-		if err != nil {
-			s.logger.Error("failed to parse dir templates", "error", err)
-			http.Error(w, "failed to parse dir templates", http.StatusInternalServerError)
 			return
 		}
 
@@ -458,7 +429,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 			CurrentPath:    r.URL.Path,
 			PathOneLevelUp: path.Join(r.URL.Path, ".."),
 		}
-		err = tmpl.Execute(w, data)
+		err = s.templates["dir.tmpl"].Execute(w, data)
 		if err != nil {
 			s.logger.Error("failed to execute dir templates", "error", err)
 			http.Error(w, "failed to execute dir templates", http.StatusInternalServerError)
@@ -550,26 +521,31 @@ func (s *server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rawSuccessTmpl, err := fs.ReadFile(assets, "assets/templates/success.tmpl")
-	if err != nil {
-		s.logger.Error("failed to read success templates", "error", err)
-		http.Error(w, "failed to read success templates", http.StatusInternalServerError)
-		return
-	}
-	tmpl, err := template.New("success").Parse(string(rawSuccessTmpl))
-	if err != nil {
-		s.logger.Error("failed to parse success templates", "error", err)
-		http.Error(w, "failed to parse success templates", http.StatusInternalServerError)
-		return
-	}
-	data := success{
-		Message: "Successfully logged in using " + provider,
-	}
-	err = tmpl.Execute(w, data)
-	if err != nil {
-		s.logger.Error("failed to execute success templates", "error", err)
-		http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
-		return
+	var data callbackSuccess
+	if s.DebugMode {
+		jsonBytes, err := json.MarshalIndent(user, "", "  ")
+		if err != nil {
+			s.logger.Error("failed to marshal user", "error", err)
+			http.Error(w, "failed to marshal user", http.StatusInternalServerError)
+			return
+		}
+		data = callbackSuccess{
+			Message:  "Successfully logged in using " + provider,
+			ShowData: true,
+			Data:     string(jsonBytes),
+		}
+	} else {
+		data = callbackSuccess{
+			Message:  "Successfully logged in using " + provider,
+			ShowData: false,
+			Data:     "",
+		}
+		err = s.templates["callback_success.tmpl"].Execute(w, data)
+		if err != nil {
+			s.logger.Error("failed to execute success templates", "error", err)
+			http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
+			return
+		}
 	}
 }
 
@@ -605,22 +581,9 @@ func (s *server) oauthLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rawTemplate, err := fs.ReadFile(assets, "assets/templates/success.tmpl")
-	if err != nil {
-		s.logger.Error("failed to read success templates", "error", err)
-		http.Error(w, "failed to read success templates", http.StatusInternalServerError)
-		return
-	}
-	tmpl, err := template.New("success").Parse(string(rawTemplate))
-	if err != nil {
-		s.logger.Error("failed to parse success templates", "error", err)
-		http.Error(w, "failed to parse success templates", http.StatusInternalServerError)
-		return
-	}
-	data := success{
+	err = s.templates["success.tmpl"].Execute(w, success{
 		Message: "Successfully logged out of " + provider,
-	}
-	err = tmpl.Execute(w, data)
+	})
 	if err != nil {
 		s.logger.Error("failed to execute success templates", "error", err)
 		http.Error(w, "failed to execute success templates", http.StatusInternalServerError)
