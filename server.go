@@ -222,15 +222,44 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Debug("got github user", "user", user)
 
-	pathParts := strings.Split(strings.TrimSuffix(r.URL.Path[1:], "/"), "/")
+	filePath := path.Join(s.sftpPrefix, "github", strings.TrimPrefix(r.URL.Path, "/gh"))
+	stat, err := s.client.Stat(filePath)
+	if err != nil {
+		s.logger.Error("failed to stat filePath", "filePath", filePath, "error", err)
+		s.handleForbidden(w, r, "not found")
+		return
+	}
+
+	realPath, err := s.client.RealPath(filePath)
+	if err != nil {
+		s.logger.Error("failed to get real path", "error", err)
+		s.handleForbidden(w, r, "not found")
+		return
+	}
+
+	sftpWD, err := s.client.Getwd()
+	if err != nil {
+		s.logger.Error("failed to get working directory", "error", err)
+		http.Error(w, "failed to get working directory", http.StatusInternalServerError)
+		return
+	}
+	fullRemotePrefix := path.Join(sftpWD, s.sftpPrefix)
+	if !strings.HasSuffix(fullRemotePrefix, "/") {
+		fullRemotePrefix += "/"
+	}
+
+	realpathParts := splitPath(strings.TrimPrefix(realPath, fullRemotePrefix))
 	var org, team string
-	if len(pathParts) > 1 {
-		org = pathParts[1]
+	if len(realpathParts) > 1 {
+		org = realpathParts[1]
 	}
-	if len(pathParts) > 2 {
-		team = pathParts[2]
+	if len(realpathParts) > 2 {
+		team = realpathParts[2]
 	}
-	s.logger.Debug("url parts", "org", org, "team", team, "urlParts", pathParts)
+	s.logger.Debug("url parts", "org", org, "team", team, "urlPath",
+		r.URL.Path, "realPath", realPath, "fullRemotePrefix", fullRemotePrefix,
+		"realpathParts", realpathParts)
+
 	if org == "" {
 		if !strings.HasSuffix(r.URL.Path, "/") {
 			http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
@@ -278,6 +307,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
 	if team == "" {
 		if !strings.HasSuffix(r.URL.Path, "/") {
 			http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
@@ -339,13 +369,6 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filePath := path.Join(s.sftpPrefix, "github", org, team, path.Join(pathParts[3:]...))
-	stat, err := s.client.Stat(filePath)
-	if err != nil {
-		s.logger.Error("failed to stat filePath", "filePath", filePath, "error", err)
-		http.Error(w, "failed to stat filePath", http.StatusInternalServerError)
-		return
-	}
 	var doFileListing bool
 	if stat.IsDir() {
 		if !strings.HasSuffix(r.URL.Path, "/") {
@@ -431,7 +454,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 		data := dirTemplateInput{
 			Files:          templateFiles,
 			Dirs:           templateDirs,
-			CurrentDir:     pathParts[len(pathParts)-1],
+			CurrentDir:     path.Base(filePath),
 			CurrentPath:    r.URL.Path,
 			PathOneLevelUp: path.Join(r.URL.Path, ".."),
 		}

@@ -89,12 +89,6 @@ func main() {
 
 			var auths []ssh.AuthMethod
 
-			// Try to use $SSH_AUTH_SOCK which contains the path of the unix file socket that the sshd agent uses
-			// for communication with other processes.
-			if agentConn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
-				auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
-			}
-
 			envPrivKey := os.Getenv("SSH_PRIVATE_KEY")
 			if envPrivKey != "" {
 				bytes := make([]byte, base64.StdEncoding.DecodedLen(len(envPrivKey)))
@@ -109,6 +103,10 @@ func main() {
 					return fmt.Errorf("failed to parse private key: %v", err)
 				}
 				auths = append(auths, ssh.PublicKeys(key))
+			} else if agentConn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
+				// Try to use $SSH_AUTH_SOCK which contains the path of the unix file socket that the sshd agent uses
+				// for communication with other processes.
+				auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(agentConn).Signers))
 			} else if _, err := os.Stat(path.Join(sshDir, "id_ed25519")); err == nil {
 				bytes, err := os.ReadFile(path.Join(sshDir, "id_ed25519"))
 				if err != nil {
@@ -220,6 +218,22 @@ func main() {
 					for _, file := range files {
 						fmt.Println(file.Name())
 					}
+					return nil
+				},
+			},
+			{
+				Name:  "realpath",
+				Usage: "get the real path of a file",
+				Action: func(cCtx *cli.Context) error {
+					filePath := cCtx.Args().First()
+					if filePath == "" {
+						return fmt.Errorf("no file path provided")
+					}
+					realPath, err := client.RealPath(path.Join(strings.TrimPrefix(remotePrefix, "/"), filePath))
+					if err != nil {
+						return err
+					}
+					fmt.Println(realPath)
 					return nil
 				},
 			},
