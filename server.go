@@ -13,7 +13,6 @@ import (
 	"github.com/markbates/goth/gothic"
 	gothGithub "github.com/markbates/goth/providers/github"
 	"github.com/pkg/sftp"
-	"github.com/russross/blackfriday/v2"
 	"html/template"
 	"io"
 	"io/fs"
@@ -236,12 +235,7 @@ func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err := s.client.Stat(path.Join(filePath, "index.html"))
 		if err != nil {
-			_, err := s.client.Stat(path.Join(filePath, "index.md"))
-			if err != nil {
-				doFileListing = true
-			} else {
-				filePath = path.Join(filePath, "index.md")
-			}
+			doFileListing = true
 		} else {
 			filePath = path.Join(filePath, "index.html")
 		}
@@ -352,21 +346,10 @@ func (s *server) ServeShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if strings.HasSuffix(filePath, ".md") {
-			fileBytes, err := io.ReadAll(file)
-			if err != nil {
-				s.logger.Error("failed to read file", "error", err)
-				http.Error(w, "failed to read file", http.StatusInternalServerError)
-				return
-			}
-			output := blackfriday.Run(fileBytes)
-			err = s.templates["base.tmpl"].Execute(w, baseTemplateInput{
-				Title: path.Base(filePath),
-				Body:  template.HTML(output),
-			})
-		} else {
-			http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
-		}
+		lastModified := stat.ModTime()
+		name := stat.Name()
+		s.logger.Debug("serving file", "name", stat.Name(), "lastModified", lastModified)
+		http.ServeContent(w, r, name, lastModified, file)
 	}
 }
 
@@ -531,12 +514,7 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err := s.client.Stat(path.Join(filePath, "index.html"))
 		if err != nil {
-			_, err := s.client.Stat(path.Join(filePath, "index.md"))
-			if err != nil {
-				doFileListing = true
-			} else {
-				filePath = path.Join(filePath, "index.md")
-			}
+			doFileListing = true
 		} else {
 			filePath = path.Join(filePath, "index.html")
 		}
@@ -647,21 +625,10 @@ func (s *server) ServeGithubShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if strings.HasSuffix(filePath, ".md") {
-			fileBytes, err := io.ReadAll(file)
-			if err != nil {
-				s.logger.Error("failed to read file", "error", err)
-				http.Error(w, "failed to read file", http.StatusInternalServerError)
-				return
-			}
-			output := blackfriday.Run(fileBytes)
-			err = s.templates["base.tmpl"].Execute(w, baseTemplateInput{
-				Title: path.Base(filePath),
-				Body:  template.HTML(output),
-			})
-		} else {
-			http.ServeContent(w, r, stat.Name(), stat.ModTime(), file)
-		}
+		lastModified := stat.ModTime()
+		name := stat.Name()
+		s.logger.Debug("serving file", "name", name, "lastModified", lastModified)
+		http.ServeContent(w, r, name, lastModified, file)
 	}
 }
 
@@ -672,7 +639,7 @@ func (s *server) handleAsset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get https://github.com/thatoddmailbox/sftpfsasset fs", http.StatusInternalServerError)
 		return
 	}
-	http.FileServer(http.FS(assetFs)).ServeHTTP(w, r)
+	http.FileServerFS(assetFs).ServeHTTP(w, r)
 }
 
 func (s *server) oauthInit(w http.ResponseWriter, r *http.Request) {
